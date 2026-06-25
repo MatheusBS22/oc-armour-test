@@ -1,7 +1,8 @@
 -- tablet.lua
--- Roda no tablet. Usa Linked Card (tunnel) para comunicar
--- com o server e com o drone.
--- Requer: tunnel, navigation
+-- Roda no tablet. Usa 2 Linked Cards:
+--   tunnel (primeira)  → fala com o PC server
+--   tunnel1 (segunda) → fala com o drone
+-- Requer: navigation
 
 local component = require("component")
 local event     = require("event")
@@ -12,15 +13,33 @@ local P         = dofile("/home/protocol.lua")
 -- ----------------------------------------------------------------
 -- Verifica componentes
 -- ----------------------------------------------------------------
-if not component.isAvailable("tunnel") then
-    error("Linked Card (tunnel) não encontrada no tablet!")
-end
 if not component.isAvailable("navigation") then
     error("Navigation Upgrade não encontrado no tablet!")
 end
 
-local tunnel = component.tunnel
-local nav    = component.navigation
+-- Pega as duas linked cards
+local tunnels = {}
+for addr, _ in component.list("tunnel") do
+    table.insert(tunnels, component.proxy(addr))
+end
+
+if #tunnels < 2 then
+    error("Precisa de 2 Linked Cards no tablet! Encontradas: " .. #tunnels)
+end
+
+-- Identifica qual card é qual pelo canal
+-- Por convenção: a card com canal menor = server, maior = drone
+-- Você pode trocar se necessário
+local tunnelServer, tunnelDrone
+if tunnels[1].getChannel() < tunnels[2].getChannel() then
+    tunnelServer = tunnels[1]
+    tunnelDrone  = tunnels[2]
+else
+    tunnelServer = tunnels[2]
+    tunnelDrone  = tunnels[1]
+end
+
+local nav = component.navigation
 
 -- ----------------------------------------------------------------
 -- Helpers de UI
@@ -66,21 +85,17 @@ local function pause()
 end
 
 -- ----------------------------------------------------------------
--- Comunicação com o server via Linked Card
---
--- Linked Card: tunnel.send(data) envia, evento modem_message recebe
--- Identificamos respostas do server pelo campo replyType = MSG_REPLY
--- Identificamos status do drone pelo campo replyType = MSG_LOG/OK/ERROR
+-- Comunicação com o server
 -- ----------------------------------------------------------------
 
 local TIMEOUT = 5
 
 local function request(msgType, data)
-    tunnel.send(serial.serialize({ type = msgType, data = data or {} }))
+    tunnelServer.send(serial.serialize({ type = msgType, data = data or {} }))
 
     local deadline = require("computer").uptime() + TIMEOUT
     while require("computer").uptime() < deadline do
-        local _, _, _, _, _, raw = event.pull(1, "modem_message")
+        local _, _, sender, _, _, raw = event.pull(1, "modem_message")
         if raw then
             local ok, resp = pcall(serial.unserialize, raw)
             if ok and resp and resp.replyType == P.MSG_REPLY then
@@ -169,7 +184,7 @@ local function screenEdit(armors)
 
     local a = resp.armor
     local x, y, z = getPosition()
-    print(string.format("\n  Editando: %s | Posição atual: X=%d Y=%d Z=%d", a.name, x, y, z))
+    print(string.format("\n  Editando: %s | Sua posição: X=%d Y=%d Z=%d", a.name, x, y, z))
     print("")
 
     local name = prompt("  Nome:  ", a.name)
@@ -220,14 +235,31 @@ local function screenSendMission(armors)
     local id = tonumber(prompt("  ID da armadura (0 = cancelar): "))
     if not id or id == 0 then return end
 
-    local x, y, z = getPosition()
-    print(string.format("\n  Entrega na sua posição: X=%d Y=%d Z=%d", x, y, z))
+    -- Busca coords da armadura no server
+    print("\n  Consultando servidor...")
+    local resp, err = request(P.MSG_GET, { id=id })
+    if not resp or not resp.ok then
+        print("  ERRO: " .. tostring(err or resp and resp.error))
+        pause() return
+    end
+
+    local armor = resp.armor
+    local dx, dy, dz = getPosition()
+
+    print(string.format("  Armadura '%s' em X=%d Y=%d Z=%d", armor.name, armor.x, armor.y, armor.z))
+    print(string.format("  Entrega na sua posição: X=%d Y=%d Z=%d", dx, dy, dz))
 
     if not confirm("  Enviar missão?") then return end
 
-    tunnel.send(serial.serialize({
+    -- Manda missão completa para o drone (com coords já incluídas)
+    tunnelDrone.send(serial.serialize({
         type = P.MSG_MISSION,
-        data = { x=x, y=y, z=z, armor_id=id }
+        data = {
+            armor_id   = id,
+            armor_name = armor.name,
+            ax = armor.x, ay = armor.y, az = armor.z,  -- coords da armadura
+            dx = dx,      dy = dy,      dz = dz,        -- coords de entrega
+        }
     }))
 
     print("\n  ✓ Missão enviada! Aguardando drone...")
@@ -240,7 +272,7 @@ local function screenSendMission(armors)
         if raw then
             local ok, msg = pcall(serial.unserialize, raw)
             if ok and msg and msg.replyType and msg.replyType ~= P.MSG_REPLY then
-                local icon = msg.replyType == P.MSG_OK and "✓" or
+                local icon = msg.replyType == P.MSG_OK    and "✓" or
                              msg.replyType == P.MSG_ERROR and "✗" or "·"
                 print("  " .. icon .. " " .. tostring(msg.text or ""))
                 if msg.replyType == P.MSG_OK or msg.replyType == P.MSG_ERROR then

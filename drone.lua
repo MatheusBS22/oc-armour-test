@@ -1,7 +1,7 @@
 -- drone.lua
--- Roda no drone. Usa Linked Card (tunnel) para comunicar.
--- Fluxo: recebe missão → busca armadura → coleta (placeholder)
---        → entrega (placeholder) → volta para base
+-- Roda no drone. Usa 1 Linked Card para falar com o tablet.
+-- Recebe missão completa (coords já incluídas) — não precisa
+-- consultar o server diretamente.
 
 local component = require("component")
 local event     = require("event")
@@ -22,16 +22,13 @@ local tunnel     = component.tunnel
 local dislocator = component.dislocator_advanced
 
 -- ----------------------------------------------------------------
--- Log — envia status para o tablet
+-- Log
 -- ----------------------------------------------------------------
 
 local function log(text, msgType)
     msgType = msgType or P.MSG_LOG
     print("[drone] " .. text)
-    tunnel.send(serial.serialize({
-        replyType = msgType,
-        text      = text,
-    }))
+    tunnel.send(serial.serialize({ replyType = msgType, text = text }))
 end
 
 -- ----------------------------------------------------------------
@@ -72,6 +69,7 @@ end
 
 -- ----------------------------------------------------------------
 -- Funções de coleta por armadura (placeholders)
+-- Implemente aqui a lógica de pegar a armadura no baú
 -- ----------------------------------------------------------------
 
 local armorCollect = {}
@@ -90,6 +88,7 @@ end
 
 -- ----------------------------------------------------------------
 -- Entrega (placeholder)
+-- Implemente aqui a lógica de entregar ao player
 -- ----------------------------------------------------------------
 
 local function deliver()
@@ -100,51 +99,25 @@ end
 
 -- ----------------------------------------------------------------
 -- Execução da missão
+-- Recebe dados completos: armor_id, ax/ay/az (armadura), dx/dy/dz (entrega)
 -- ----------------------------------------------------------------
 
 local function executeMission(data)
-    local armorId   = data.armor_id
-    local deliveryX = data.x
-    local deliveryY = data.y
-    local deliveryZ = data.z
+    local armorId = data.armor_id
+    local name    = data.armor_name or "armadura"
 
-    log("Missão iniciada: armadura ID=" .. armorId)
+    log(string.format("Missão: '%s' (ID=%d)", name, armorId))
 
-    -- 1. Consulta o server pelas coords da armadura
-    log("Consultando servidor...")
-    tunnel.send(serial.serialize({ type = P.MSG_GET, data = { id = armorId } }))
-
-    local resp = nil
-    local deadline = require("computer").uptime() + 5
-    while require("computer").uptime() < deadline do
-        local _, _, _, _, _, raw = event.pull(1, "modem_message")
-        if raw then
-            local ok, msg = pcall(serial.unserialize, raw)
-            if ok and msg and msg.replyType == P.MSG_REPLY then
-                resp = msg
-                break
-            end
-        end
-    end
-
-    if not resp or not resp.ok then
-        log("Erro ao obter armadura: " .. tostring(resp and resp.error or "timeout"), P.MSG_ERROR)
-        return false
-    end
-
-    local armor = resp.armor
-    log(string.format("Armadura '%s' em X=%d Y=%d Z=%d", armor.name, armor.x, armor.y, armor.z))
-
-    -- 2. Teleporta para o local da armadura
-    log("Teleportando para armadura...")
-    local ok2, err2 = teleportToCoords(armor.x, armor.y, armor.z, "_armor")
-    if not ok2 then
-        log("Falha: " .. tostring(err2), P.MSG_ERROR)
+    -- 1. Teleporta para o local da armadura
+    log(string.format("Indo buscar em X=%d Y=%d Z=%d", data.ax, data.ay, data.az))
+    local ok1, err1 = teleportToCoords(data.ax, data.ay, data.az, "_armor")
+    if not ok1 then
+        log("Falha no teleporte: " .. tostring(err1), P.MSG_ERROR)
         return false
     end
     log("Chegou no local da armadura.")
 
-    -- 3. Coleta
+    -- 2. Coleta
     local collectFn = armorCollect[armorId]
     if not collectFn then
         log("Sem função de coleta para ID=" .. armorId, P.MSG_ERROR)
@@ -156,27 +129,27 @@ local function executeMission(data)
     end
     log("Armadura coletada.")
 
-    -- 4. Teleporta para entrega
-    log(string.format("Teleportando para entrega X=%d Y=%d Z=%d", deliveryX, deliveryY, deliveryZ))
-    local ok4, err4 = teleportToCoords(deliveryX, deliveryY, deliveryZ, "_delivery")
-    if not ok4 then
-        log("Falha: " .. tostring(err4), P.MSG_ERROR)
+    -- 3. Teleporta para entrega
+    log(string.format("Indo entregar em X=%d Y=%d Z=%d", data.dx, data.dy, data.dz))
+    local ok3, err3 = teleportToCoords(data.dx, data.dy, data.dz, "_delivery")
+    if not ok3 then
+        log("Falha no teleporte: " .. tostring(err3), P.MSG_ERROR)
         return false
     end
     log("Chegou no ponto de entrega.")
 
-    -- 5. Entrega
+    -- 4. Entrega
     if not deliver() then
         log("Falha na entrega.", P.MSG_ERROR)
         return false
     end
     log("Entrega concluída.")
 
-    -- 6. Volta para base
+    -- 5. Volta para base
     log("Retornando para base...")
-    local ok6, err6 = teleportTo(P.WAYPOINT_BASE)
-    if not ok6 then
-        log("Falha ao retornar: " .. tostring(err6), P.MSG_ERROR)
+    local ok5, err5 = teleportTo(P.WAYPOINT_BASE)
+    if not ok5 then
+        log("Falha ao retornar: " .. tostring(err5), P.MSG_ERROR)
         return false
     end
 
@@ -196,7 +169,6 @@ print("Aguardando missões...")
 
 while true do
     local _, _, _, _, _, raw = event.pull("modem_message")
-
     if raw then
         local ok, msg = pcall(serial.unserialize, raw)
         if ok and msg and msg.type == P.MSG_MISSION then
