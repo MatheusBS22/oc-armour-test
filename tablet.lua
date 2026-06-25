@@ -1,36 +1,32 @@
 -- tablet.lua
--- Roda no tablet. Interface de texto para:
---   - Gerenciar armaduras (CRUD via server)
---   - Pegar posição atual via Navigation Upgrade
---   - Enviar missão para o drone
+-- Roda no tablet. Usa Linked Card (tunnel) para comunicar
+-- com o server e com o drone.
+-- Requer: tunnel, navigation
 
 local component = require("component")
 local event     = require("event")
 local serial    = require("serialization")
 local term      = require("term")
-local P         = require("protocol")
+local P         = dofile("/home/protocol.lua")
 
 -- ----------------------------------------------------------------
 -- Verifica componentes
 -- ----------------------------------------------------------------
-if not component.isAvailable("modem") then
-    error("Modem não encontrado no tablet!")
+if not component.isAvailable("tunnel") then
+    error("Linked Card (tunnel) não encontrada no tablet!")
 end
 if not component.isAvailable("navigation") then
     error("Navigation Upgrade não encontrado no tablet!")
 end
 
-local modem = component.modem
-local nav   = component.navigation
-
-modem.open(P.PORT_REPLY)
-modem.open(P.PORT_STATUS)
+local tunnel = component.tunnel
+local nav    = component.navigation
 
 -- ----------------------------------------------------------------
 -- Helpers de UI
 -- ----------------------------------------------------------------
 
-local W = 50  -- largura da caixa
+local W = 50
 
 local function cls()
     term.clear()
@@ -52,7 +48,7 @@ end
 
 local function prompt(msg, default)
     io.write(msg)
-    if default then io.write("[" .. tostring(default) .. "] ") end
+    if default ~= nil then io.write("[" .. tostring(default) .. "] ") end
     local input = io.read()
     if input == "" and default ~= nil then return default end
     return input
@@ -70,33 +66,33 @@ local function pause()
 end
 
 -- ----------------------------------------------------------------
--- Comunicação com o server
+-- Comunicação com o server via Linked Card
+--
+-- Linked Card: tunnel.send(data) envia, evento modem_message recebe
+-- Identificamos respostas do server pelo campo replyType = MSG_REPLY
+-- Identificamos status do drone pelo campo replyType = MSG_LOG/OK/ERROR
 -- ----------------------------------------------------------------
 
-local TIMEOUT = 5  -- segundos
+local TIMEOUT = 5
 
 local function request(msgType, data)
-    local msg = serial.serialize({ type = msgType, data = data or {} })
-    modem.broadcast(P.PORT_SERVER, msg)
+    tunnel.send(serial.serialize({ type = msgType, data = data or {} }))
 
-    -- Aguarda resposta
-    local _, _, _, port, _, raw = event.pull(TIMEOUT, "modem_message")
-    if not raw then
-        return nil, "Servidor não respondeu (timeout)"
+    local deadline = require("computer").uptime() + TIMEOUT
+    while require("computer").uptime() < deadline do
+        local _, _, _, _, _, raw = event.pull(1, "modem_message")
+        if raw then
+            local ok, resp = pcall(serial.unserialize, raw)
+            if ok and resp and resp.replyType == P.MSG_REPLY then
+                return resp
+            end
+        end
     end
-    if port ~= P.PORT_REPLY then
-        return nil, "Resposta em porta errada"
-    end
-
-    local ok, resp = pcall(serial.unserialize, raw)
-    if not ok then
-        return nil, "Resposta malformada"
-    end
-    return resp
+    return nil, "Servidor não respondeu (timeout)"
 end
 
 -- ----------------------------------------------------------------
--- Funções CRUD
+-- Helpers
 -- ----------------------------------------------------------------
 
 local function listArmors()
@@ -107,14 +103,12 @@ local function listArmors()
 end
 
 local function getPosition()
-    -- Navigation retorna posição relativa ao mapa inserido no upgrade.
-    -- Se não tiver mapa, retorna posição absoluta mesmo assim no OC.
     local x, y, z = nav.getPosition()
     return math.floor(x), math.floor(y), math.floor(z)
 end
 
 -- ----------------------------------------------------------------
--- Telas do CRUD
+-- Telas CRUD
 -- ----------------------------------------------------------------
 
 local function showList(armors)
@@ -133,13 +127,12 @@ end
 
 local function screenAdd()
     header("ADICIONAR ARMADURA")
-
     local x, y, z = getPosition()
     print(string.format("  Posição atual: X=%d Y=%d Z=%d", x, y, z))
-    print("  (deixe em branco para usar a posição atual)")
+    print("  (ENTER para usar posição atual)")
     print("")
 
-    local name = prompt("  Nome da armadura: ")
+    local name = prompt("  Nome: ")
     if name == "" then print("  Nome obrigatório.") pause() return end
 
     local px = tonumber(prompt("  X: ", x))
@@ -147,18 +140,16 @@ local function screenAdd()
     local pz = tonumber(prompt("  Z: ", z))
 
     if not px or not py or not pz then
-        print("  Coordenadas inválidas.")
-        pause()
-        return
+        print("  Coordenadas inválidas.") pause() return
     end
 
-    local resp, err = request(P.MSG_ADD, { name = name, x = px, y = py, z = pz })
+    local resp, err = request(P.MSG_ADD, { name=name, x=px, y=py, z=pz })
     if not resp then
-        print("  ERRO: " .. err)
+        print("  ERRO: " .. tostring(err))
     elseif not resp.ok then
         print("  ERRO: " .. resp.error)
     else
-        print(string.format("\n  ✓ Armadura '%s' cadastrada com ID=%d", resp.armor.name, resp.armor.id))
+        print(string.format("\n  ✓ '%s' cadastrada com ID=%d", resp.armor.name, resp.armor.id))
     end
     pause()
 end
@@ -170,20 +161,15 @@ local function screenEdit(armors)
     local id = tonumber(prompt("  ID para editar (0 = cancelar): "))
     if not id or id == 0 then return end
 
-    local resp, err = request(P.MSG_GET, { id = id })
+    local resp, err = request(P.MSG_GET, { id=id })
     if not resp or not resp.ok then
-        print("  ERRO: " .. (err or resp and resp.error or "?"))
-        pause()
-        return
+        print("  ERRO: " .. tostring(err or resp and resp.error))
+        pause() return
     end
 
     local a = resp.armor
-    print(string.format("\n  Editando: %s (ID=%d)", a.name, a.id))
-    print("  (deixe em branco para manter o valor atual)")
-    print("")
-
     local x, y, z = getPosition()
-    print(string.format("  Posição atual do tablet: X=%d Y=%d Z=%d", x, y, z))
+    print(string.format("\n  Editando: %s | Posição atual: X=%d Y=%d Z=%d", a.name, x, y, z))
     print("")
 
     local name = prompt("  Nome:  ", a.name)
@@ -191,20 +177,13 @@ local function screenEdit(armors)
     local py   = tonumber(prompt("  Y:     ", a.y))
     local pz   = tonumber(prompt("  Z:     ", a.z))
 
-    local resp2, err2 = request(P.MSG_EDIT, {
-        id   = id,
-        name = name,
-        x    = px,
-        y    = py,
-        z    = pz,
-    })
-
+    local resp2, err2 = request(P.MSG_EDIT, { id=id, name=name, x=px, y=py, z=pz })
     if not resp2 then
-        print("  ERRO: " .. err2)
+        print("  ERRO: " .. tostring(err2))
     elseif not resp2.ok then
         print("  ERRO: " .. resp2.error)
     else
-        print(string.format("\n  ✓ Armadura ID=%d atualizada.", id))
+        print("  ✓ Atualizado.")
     end
     pause()
 end
@@ -215,16 +194,15 @@ local function screenRemove(armors)
 
     local id = tonumber(prompt("  ID para remover (0 = cancelar): "))
     if not id or id == 0 then return end
+    if not confirm("  Confirma?") then return end
 
-    if not confirm("  Confirma remoção do ID=" .. id .. "?") then return end
-
-    local resp, err = request(P.MSG_REMOVE, { id = id })
+    local resp, err = request(P.MSG_REMOVE, { id=id })
     if not resp then
-        print("  ERRO: " .. err)
+        print("  ERRO: " .. tostring(err))
     elseif not resp.ok then
         print("  ERRO: " .. resp.error)
     else
-        print(string.format("\n  ✓ Armadura '%s' removida.", resp.armor.name))
+        print("  ✓ Removida.")
     end
     pause()
 end
@@ -234,47 +212,38 @@ local function screenSendMission(armors)
 
     if #armors == 0 then
         print("  Nenhuma armadura cadastrada.")
-        pause()
-        return
+        pause() return
     end
 
     showList(armors)
 
-    local id = tonumber(prompt("  ID da armadura desejada (0 = cancelar): "))
+    local id = tonumber(prompt("  ID da armadura (0 = cancelar): "))
     if not id or id == 0 then return end
 
-    -- Pega posição atual do tablet como destino de entrega
     local x, y, z = getPosition()
-    print(string.format("\n  Posição de entrega (sua posição atual): X=%d Y=%d Z=%d", x, y, z))
+    print(string.format("\n  Entrega na sua posição: X=%d Y=%d Z=%d", x, y, z))
 
     if not confirm("  Enviar missão?") then return end
 
-    local mission = serial.serialize({
+    tunnel.send(serial.serialize({
         type = P.MSG_MISSION,
-        data = {
-            x        = x,
-            y        = y,
-            z        = z,
-            armor_id = id,
-        }
-    })
+        data = { x=x, y=y, z=z, armor_id=id }
+    }))
 
-    modem.broadcast(P.PORT_DRONE, mission)
-    print("\n  ✓ Missão enviada! Aguardando status do drone...")
+    print("\n  ✓ Missão enviada! Aguardando drone...")
     print("")
 
-    -- Fica escutando status do drone por até 60 segundos
-    local deadline = computer.uptime() + 60
-    while computer.uptime() < deadline do
-        local _, _, _, port, _, raw = event.pull(2, "modem_message")
-        if port == P.PORT_STATUS and raw then
+    -- Escuta status do drone por 60 segundos
+    local deadline = require("computer").uptime() + 60
+    while require("computer").uptime() < deadline do
+        local _, _, _, _, _, raw = event.pull(2, "modem_message")
+        if raw then
             local ok, msg = pcall(serial.unserialize, raw)
-            if ok and msg then
-                local icon = msg.type == P.MSG_OK and "✓" or
-                             msg.type == P.MSG_ERROR and "✗" or "·"
+            if ok and msg and msg.replyType and msg.replyType ~= P.MSG_REPLY then
+                local icon = msg.replyType == P.MSG_OK and "✓" or
+                             msg.replyType == P.MSG_ERROR and "✗" or "·"
                 print("  " .. icon .. " " .. tostring(msg.text or ""))
-                -- Para de escutar quando receber OK ou ERROR final
-                if msg.type == P.MSG_OK or msg.type == P.MSG_ERROR then
+                if msg.replyType == P.MSG_OK or msg.replyType == P.MSG_ERROR then
                     break
                 end
             end
@@ -290,7 +259,6 @@ end
 
 local function main()
     while true do
-        -- Carrega lista a cada iteração para manter atualizado
         local armors, err = listArmors()
 
         header("SISTEMA DE ARMADURAS")
@@ -317,24 +285,12 @@ local function main()
 
         local op = prompt("  Opção: ")
 
-        if op == "1" then
-            header("ARMADURAS CADASTRADAS")
-            showList(armors)
-            pause()
-        elseif op == "2" then
-            screenAdd()
-        elseif op == "3" then
-            screenEdit(armors)
-        elseif op == "4" then
-            screenRemove(armors)
-        elseif op == "5" then
-            screenSendMission(armors)
-        elseif op == "0" then
-            cls()
-            print("Encerrando tablet...")
-            modem.close(P.PORT_REPLY)
-            modem.close(P.PORT_STATUS)
-            return
+        if     op == "1" then header("ARMADURAS") showList(armors) pause()
+        elseif op == "2" then screenAdd()
+        elseif op == "3" then screenEdit(armors)
+        elseif op == "4" then screenRemove(armors)
+        elseif op == "5" then screenSendMission(armors)
+        elseif op == "0" then cls() return
         end
     end
 end
