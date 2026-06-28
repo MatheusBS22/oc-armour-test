@@ -1,17 +1,28 @@
 local function proxy(n)
-    local a=component.list(n)() 
+    local a=component.list(n)()
     return a and component.proxy(a) or nil
+end
+
+-- Escapa uma string sem usar string.format %q
+local function escape(s)
+    s=tostring(s)
+    s=s:gsub('\\','\\\\')
+    s=s:gsub('"','\\"')
+    s=s:gsub('\n','\\n')
+    s=s:gsub('\r','\\r')
+    s=s:gsub('\0','\\0')
+    return '"'..s..'"'
 end
 
 local function serialize(v)
     local t=type(v)
     if t=="nil" then return "nil"
     elseif t=="boolean" or t=="number" then return tostring(v)
-    elseif t=="string" then return string.format("%q",v)
+    elseif t=="string" then return escape(v)
     elseif t=="table" then
         local s="{"
         for k,val in pairs(v) do
-            local ks=type(k)=="string" and string.format("[%q]",k) or "["..tostring(k).."]"
+            local ks=type(k)=="string" and "["..escape(k).."]" or "["..tostring(k).."]"
             s=s..ks.."="..serialize(val)..","
         end
         return s.."}"
@@ -131,7 +142,7 @@ local function mission(data)
     log("Concluido!",P.MSG_OK)
 end
 
-log("Drone OK ch_t="..tT.getChannel().." ch_s="..tS.getChannel())
+log("Drone OK tT="..tT.getChannel().." tS="..tS.getChannel())
 
 while true do
     local ev,_,_,_,_,raw=computer.pullSignal(1)
