@@ -1,7 +1,6 @@
--- server.lua
--- Roda no PC fixo em base.
--- Usa Linked Card (componente "tunnel") para comunicar com o tablet.
--- Guarda armaduras em /home/armors.json
+-- server.lua — roda no PC fixo
+-- 1 Linked Card: fala com o drone (Par 2)
+-- O drone consulta armaduras e repassa missões
 
 local component  = require("component")
 local event      = require("event")
@@ -9,19 +8,12 @@ local serial     = require("serialization")
 local filesystem = require("filesystem")
 local P          = dofile("/home/protocol.lua")
 
--- ----------------------------------------------------------------
--- Verifica componentes
--- ----------------------------------------------------------------
 if not component.isAvailable("tunnel") then
-    error("Linked Card (tunnel) não encontrada no PC servidor!")
+    error("Linked Card não encontrada no PC!")
 end
 
 local tunnel    = component.tunnel
 local SAVE_PATH = "/home/armors.json"
-
--- ----------------------------------------------------------------
--- Persistência
--- ----------------------------------------------------------------
 
 local function load()
     if not filesystem.exists(SAVE_PATH) then return {} end
@@ -52,11 +44,7 @@ local function findIndex(armors, id)
     return nil
 end
 
--- ----------------------------------------------------------------
--- Handlers
--- ----------------------------------------------------------------
-
-local armors = load()
+local armors   = load()
 local handlers = {}
 
 handlers[P.MSG_LIST] = function(data)
@@ -112,10 +100,6 @@ handlers[P.MSG_REMOVE] = function(data)
     return { ok = true, armor = removed }
 end
 
--- ----------------------------------------------------------------
--- Loop principal
--- ----------------------------------------------------------------
-
 print("╔══════════════════════════════╗")
 print("║   SERVIDOR DE ARMADURAS OC   ║")
 print("╚══════════════════════════════╝")
@@ -124,32 +108,23 @@ print("Armaduras carregadas: " .. #armors)
 print("")
 
 while true do
-    -- Linked Card dispara modem_message igual ao modem normal
-    -- mas sem porta (porta = 0 sempre)
-    local _, _, sender, _, _, raw = event.pull("modem_message")
-
-    local ok, msg = pcall(serial.unserialize, raw)
-    if not ok or type(msg) ~= "table" or not msg.type then
-        print("[!] Mensagem inválida")
-    else
-        local handler = handlers[msg.type]
-        local response
-
-        if not handler then
-            response = { ok = false, error = "Tipo desconhecido: " .. msg.type }
+    local _, _, _, _, _, raw = event.pull("modem_message")
+    if raw then
+        local ok, msg = pcall(serial.unserialize, raw)
+        if not ok or type(msg) ~= "table" or not msg.type then
+            print("[!] Mensagem inválida")
         else
-            local success, result = pcall(handler, msg.data or {})
-            if success then
-                response = result
+            local handler = handlers[msg.type]
+            local response
+            if not handler then
+                response = { ok = false, error = "Tipo desconhecido: " .. msg.type }
             else
-                response = { ok = false, error = tostring(result) }
+                local success, result = pcall(handler, msg.data or {})
+                response = success and result or { ok = false, error = tostring(result) }
             end
+            print("[" .. msg.type .. "] → " .. (response.ok and "OK" or "ERRO"))
+            response.replyType = P.MSG_REPLY
+            tunnel.send(serial.serialize(response))
         end
-
-        print("[" .. msg.type .. "] → " .. (response.ok and "OK" or "ERRO"))
-
-        -- Responde marcando como REPLY para o tablet identificar
-        response.replyType = P.MSG_REPLY
-        tunnel.send(serial.serialize(response))
     end
 end

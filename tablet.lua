@@ -1,8 +1,6 @@
--- tablet.lua
--- Roda no tablet. Usa 2 Linked Cards:
---   tunnel (primeira)  → fala com o PC server
---   tunnel1 (segunda) → fala com o drone
--- Requer: navigation
+-- tablet.lua — roda no tablet
+-- 1 Linked Card: fala com o drone (Par 1)
+-- O drone faz relay das requisições ao server
 
 local component = require("component")
 local event     = require("event")
@@ -10,59 +8,26 @@ local serial    = require("serialization")
 local term      = require("term")
 local P         = dofile("/home/protocol.lua")
 
--- ----------------------------------------------------------------
--- Verifica componentes
--- ----------------------------------------------------------------
+if not component.isAvailable("tunnel") then
+    error("Linked Card não encontrada no tablet!")
+end
 if not component.isAvailable("navigation") then
-    error("Navigation Upgrade não encontrado no tablet!")
+    error("Navigation Upgrade não encontrado!")
 end
 
--- Pega as duas linked cards
-local tunnels = {}
-for addr, _ in component.list("tunnel") do
-    table.insert(tunnels, component.proxy(addr))
-end
-
-if #tunnels < 2 then
-    error("Precisa de 2 Linked Cards no tablet! Encontradas: " .. #tunnels)
-end
-
--- Identifica qual card é qual pelo canal
--- Por convenção: a card com canal menor = server, maior = drone
--- Você pode trocar se necessário
-local tunnelServer, tunnelDrone
-if tunnels[1].getChannel() < tunnels[2].getChannel() then
-    tunnelServer = tunnels[1]
-    tunnelDrone  = tunnels[2]
-else
-    tunnelServer = tunnels[2]
-    tunnelDrone  = tunnels[1]
-end
-
-local nav = component.navigation
-
--- ----------------------------------------------------------------
--- Helpers de UI
--- ----------------------------------------------------------------
+local tunnel = component.tunnel
+local nav    = component.navigation
 
 local W = 50
 
-local function cls()
-    term.clear()
-    term.setCursor(1, 1)
-end
-
-local function line(char)
-    print(string.rep(char or "─", W))
-end
+local function cls() term.clear() term.setCursor(1,1) end
+local function line(c) print(string.rep(c or "─", W)) end
 
 local function header(title)
-    cls()
-    line("═")
+    cls() line("═")
     local pad = math.floor((W - #title - 2) / 2)
     print(string.rep(" ", pad) .. "[ " .. title .. " ]")
-    line("═")
-    print("")
+    line("═") print("")
 end
 
 local function prompt(msg, default)
@@ -75,27 +40,21 @@ end
 
 local function confirm(msg)
     io.write(msg .. " (s/n): ")
-    local r = io.read()
-    return r == "s" or r == "S"
+    return io.read():lower() == "s"
 end
 
 local function pause()
-    io.write("\nPressione ENTER para continuar...")
-    io.read()
+    io.write("\nENTER para continuar...") io.read()
 end
 
--- ----------------------------------------------------------------
--- Comunicação com o server
--- ----------------------------------------------------------------
+local TIMEOUT = 8
 
-local TIMEOUT = 5
-
+-- Toda comunicação vai para o drone, que repassa ao server se necessário
 local function request(msgType, data)
-    tunnelServer.send(serial.serialize({ type = msgType, data = data or {} }))
-
+    tunnel.send(serial.serialize({ type = msgType, data = data or {} }))
     local deadline = require("computer").uptime() + TIMEOUT
     while require("computer").uptime() < deadline do
-        local _, _, sender, _, _, raw = event.pull(1, "modem_message")
+        local _, _, _, _, _, raw = event.pull(1, "modem_message")
         if raw then
             local ok, resp = pcall(serial.unserialize, raw)
             if ok and resp and resp.replyType == P.MSG_REPLY then
@@ -103,18 +62,14 @@ local function request(msgType, data)
             end
         end
     end
-    return nil, "Servidor não respondeu (timeout)"
+    return nil, "Sem resposta (timeout)"
 end
 
--- ----------------------------------------------------------------
--- Helpers
--- ----------------------------------------------------------------
-
 local function listArmors()
-    local resp, err = request(P.MSG_LIST)
-    if not resp then return nil, err end
-    if not resp.ok then return nil, resp.error end
-    return resp.armors
+    local r, e = request(P.MSG_LIST)
+    if not r then return nil, e end
+    if not r.ok then return nil, r.error end
+    return r.armors
 end
 
 local function getPosition()
@@ -122,19 +77,14 @@ local function getPosition()
     return math.floor(x), math.floor(y), math.floor(z)
 end
 
--- ----------------------------------------------------------------
--- Telas CRUD
--- ----------------------------------------------------------------
-
 local function showList(armors)
     if #armors == 0 then
         print("  (nenhuma armadura cadastrada)")
     else
-        print(string.format("  %-4s %-20s %6s %6s %6s", "ID", "NOME", "X", "Y", "Z"))
+        print(string.format("  %-4s %-20s %6s %6s %6s", "ID","NOME","X","Y","Z"))
         line()
         for _, a in ipairs(armors) do
-            print(string.format("  %-4d %-20s %6d %6d %6d",
-                a.id, a.name, a.x, a.y, a.z))
+            print(string.format("  %-4d %-20s %6d %6d %6d", a.id, a.name, a.x, a.y, a.z))
         end
     end
     print("")
@@ -144,186 +94,116 @@ local function screenAdd()
     header("ADICIONAR ARMADURA")
     local x, y, z = getPosition()
     print(string.format("  Posição atual: X=%d Y=%d Z=%d", x, y, z))
-    print("  (ENTER para usar posição atual)")
     print("")
-
     local name = prompt("  Nome: ")
     if name == "" then print("  Nome obrigatório.") pause() return end
-
     local px = tonumber(prompt("  X: ", x))
     local py = tonumber(prompt("  Y: ", y))
     local pz = tonumber(prompt("  Z: ", z))
-
-    if not px or not py or not pz then
-        print("  Coordenadas inválidas.") pause() return
-    end
-
-    local resp, err = request(P.MSG_ADD, { name=name, x=px, y=py, z=pz })
-    if not resp then
-        print("  ERRO: " .. tostring(err))
-    elseif not resp.ok then
-        print("  ERRO: " .. resp.error)
-    else
-        print(string.format("\n  ✓ '%s' cadastrada com ID=%d", resp.armor.name, resp.armor.id))
-    end
+    if not px or not py or not pz then print("  Coords inválidas.") pause() return end
+    local r, e = request(P.MSG_ADD, { name=name, x=px, y=py, z=pz })
+    if not r then print("  ERRO: "..tostring(e))
+    elseif not r.ok then print("  ERRO: "..r.error)
+    else print(string.format("\n  ✓ '%s' ID=%d", r.armor.name, r.armor.id)) end
     pause()
 end
 
 local function screenEdit(armors)
     header("EDITAR ARMADURA")
     showList(armors)
-
-    local id = tonumber(prompt("  ID para editar (0 = cancelar): "))
+    local id = tonumber(prompt("  ID (0=cancelar): "))
     if not id or id == 0 then return end
-
-    local resp, err = request(P.MSG_GET, { id=id })
-    if not resp or not resp.ok then
-        print("  ERRO: " .. tostring(err or resp and resp.error))
-        pause() return
-    end
-
-    local a = resp.armor
+    local r, e = request(P.MSG_GET, { id=id })
+    if not r or not r.ok then print("  ERRO: "..tostring(e or r and r.error)) pause() return end
+    local a = r.armor
     local x, y, z = getPosition()
-    print(string.format("\n  Editando: %s | Sua posição: X=%d Y=%d Z=%d", a.name, x, y, z))
-    print("")
-
-    local name = prompt("  Nome:  ", a.name)
-    local px   = tonumber(prompt("  X:     ", a.x))
-    local py   = tonumber(prompt("  Y:     ", a.y))
-    local pz   = tonumber(prompt("  Z:     ", a.z))
-
-    local resp2, err2 = request(P.MSG_EDIT, { id=id, name=name, x=px, y=py, z=pz })
-    if not resp2 then
-        print("  ERRO: " .. tostring(err2))
-    elseif not resp2.ok then
-        print("  ERRO: " .. resp2.error)
-    else
-        print("  ✓ Atualizado.")
-    end
+    print(string.format("\n  Editando: %s | Sua pos: X=%d Y=%d Z=%d", a.name, x, y, z))
+    local name = prompt("  Nome: ", a.name)
+    local px = tonumber(prompt("  X: ", a.x))
+    local py = tonumber(prompt("  Y: ", a.y))
+    local pz = tonumber(prompt("  Z: ", a.z))
+    local r2, e2 = request(P.MSG_EDIT, { id=id, name=name, x=px, y=py, z=pz })
+    if not r2 then print("  ERRO: "..tostring(e2))
+    elseif not r2.ok then print("  ERRO: "..r2.error)
+    else print("  ✓ Atualizado.") end
     pause()
 end
 
 local function screenRemove(armors)
     header("REMOVER ARMADURA")
     showList(armors)
-
-    local id = tonumber(prompt("  ID para remover (0 = cancelar): "))
+    local id = tonumber(prompt("  ID (0=cancelar): "))
     if not id or id == 0 then return end
     if not confirm("  Confirma?") then return end
-
-    local resp, err = request(P.MSG_REMOVE, { id=id })
-    if not resp then
-        print("  ERRO: " .. tostring(err))
-    elseif not resp.ok then
-        print("  ERRO: " .. resp.error)
-    else
-        print("  ✓ Removida.")
-    end
+    local r, e = request(P.MSG_REMOVE, { id=id })
+    if not r then print("  ERRO: "..tostring(e))
+    elseif not r.ok then print("  ERRO: "..r.error)
+    else print("  ✓ Removida.") end
     pause()
 end
 
 local function screenSendMission(armors)
     header("ENVIAR MISSÃO AO DRONE")
-
-    if #armors == 0 then
-        print("  Nenhuma armadura cadastrada.")
-        pause() return
-    end
-
+    if #armors == 0 then print("  Nenhuma armadura.") pause() return end
     showList(armors)
-
-    local id = tonumber(prompt("  ID da armadura (0 = cancelar): "))
+    local id = tonumber(prompt("  ID da armadura (0=cancelar): "))
     if not id or id == 0 then return end
-
-    -- Busca coords da armadura no server
-    print("\n  Consultando servidor...")
-    local resp, err = request(P.MSG_GET, { id=id })
-    if not resp or not resp.ok then
-        print("  ERRO: " .. tostring(err or resp and resp.error))
-        pause() return
-    end
-
-    local armor = resp.armor
     local dx, dy, dz = getPosition()
-
-    print(string.format("  Armadura '%s' em X=%d Y=%d Z=%d", armor.name, armor.x, armor.y, armor.z))
-    print(string.format("  Entrega na sua posição: X=%d Y=%d Z=%d", dx, dy, dz))
-
+    print(string.format("\n  Entrega em: X=%d Y=%d Z=%d", dx, dy, dz))
     if not confirm("  Enviar missão?") then return end
 
-    -- Manda missão completa para o drone (com coords já incluídas)
-    tunnelDrone.send(serial.serialize({
+    -- Manda missão ao drone — ele busca as coords no server
+    tunnel.send(serial.serialize({
         type = P.MSG_MISSION,
-        data = {
-            armor_id   = id,
-            armor_name = armor.name,
-            ax = armor.x, ay = armor.y, az = armor.z,  -- coords da armadura
-            dx = dx,      dy = dy,      dz = dz,        -- coords de entrega
-        }
+        data = { armor_id=id, dx=dx, dy=dy, dz=dz }
     }))
 
     print("\n  ✓ Missão enviada! Aguardando drone...")
     print("")
 
-    -- Escuta status do drone por 60 segundos
-    local deadline = require("computer").uptime() + 60
+    local deadline = require("computer").uptime() + 120
     while require("computer").uptime() < deadline do
         local _, _, _, _, _, raw = event.pull(2, "modem_message")
         if raw then
             local ok, msg = pcall(serial.unserialize, raw)
             if ok and msg and msg.replyType and msg.replyType ~= P.MSG_REPLY then
-                local icon = msg.replyType == P.MSG_OK    and "✓" or
+                local icon = msg.replyType == P.MSG_OK and "✓" or
                              msg.replyType == P.MSG_ERROR and "✗" or "·"
                 print("  " .. icon .. " " .. tostring(msg.text or ""))
-                if msg.replyType == P.MSG_OK or msg.replyType == P.MSG_ERROR then
-                    break
-                end
+                if msg.replyType == P.MSG_OK or msg.replyType == P.MSG_ERROR then break end
             end
         end
     end
-
     pause()
 end
-
--- ----------------------------------------------------------------
--- Menu principal
--- ----------------------------------------------------------------
 
 local function main()
     while true do
         local armors, err = listArmors()
-
         header("SISTEMA DE ARMADURAS")
-
         if not armors then
-            print("  [!] Servidor offline: " .. tostring(err))
-            print("")
-            armors = {}
+            print("  [!] Drone/Server offline: " .. tostring(err))
+            print("") armors = {}
         else
-            print("  Armaduras cadastradas: " .. #armors)
-            print("")
+            print("  Armaduras: " .. #armors) print("")
         end
-
         line()
-        print("  1. Listar armaduras")
-        print("  2. Adicionar armadura")
-        print("  3. Editar armadura")
-        print("  4. Remover armadura")
+        print("  1. Listar")
+        print("  2. Adicionar")
+        print("  3. Editar")
+        print("  4. Remover")
         line()
         print("  5. Enviar missão ao drone")
         line()
         print("  0. Sair")
         print("")
-
         local op = prompt("  Opção: ")
-
         if     op == "1" then header("ARMADURAS") showList(armors) pause()
         elseif op == "2" then screenAdd()
         elseif op == "3" then screenEdit(armors)
         elseif op == "4" then screenRemove(armors)
         elseif op == "5" then screenSendMission(armors)
-        elseif op == "0" then cls() return
-        end
+        elseif op == "0" then cls() return end
     end
 end
 
