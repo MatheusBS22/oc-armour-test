@@ -1,14 +1,75 @@
--- drone.lua — roda no drone
--- Sem dependência de arquivos externos — protocol embutido
--- 2 Linked Cards: tunnelTablet (Par 1) e tunnelServer (Par 2)
+-- drone.lua
+-- Roda direto na EEPROM do drone — sem require(), sem OpenOS
+-- Usa apenas APIs nativas: component, computer
+-- 2 Linked Cards: menor canal = tablet, maior = server
 
-local component = require("component")
-local event     = require("event")
-local serial    = require("serialization")
+local function proxy(name)
+    local addr = component.list(name)()
+    if not addr then return nil end
+    return component.proxy(addr)
+end
+
+-- Serialização simples sem require("serialization")
+-- Usa o componente data ou implementação própria
+local serial = proxy("data")
+
+-- Como não temos serialization do OpenOS, usamos uma implementação mínima
+local function serialize(val)
+    local t = type(val)
+    if t == "nil"     then return "nil"
+    elseif t == "boolean" then return tostring(val)
+    elseif t == "number"  then return tostring(val)
+    elseif t == "string"  then return string.format("%q", val)
+    elseif t == "table"   then
+        local s = "{"
+        for k, v in pairs(val) do
+            if type(k) == "string" then
+                s = s .. "[" .. string.format("%q",k) .. "]=" .. serialize(v) .. ","
+            else
+                s = s .. "[" .. tostring(k) .. "]=" .. serialize(v) .. ","
+            end
+        end
+        return s .. "}"
+    end
+    return "nil"
+end
+
+local function unserialize(s)
+    local fn = load("return " .. s)
+    if fn then return fn() end
+    return nil
+end
 
 -- ----------------------------------------------------------------
--- Protocol embutido (sem dofile)
+-- Componentes
 -- ----------------------------------------------------------------
+local dislocator = proxy("dislocator_advanced")
+if not dislocator then
+    computer.beep(440, 0.5)
+    error("DislocatorAdvanced nao encontrado!")
+end
+
+-- Pega as duas linked cards
+local tunnels = {}
+for addr, _ in component.list("tunnel") do
+    table.insert(tunnels, component.proxy(addr))
+end
+
+if #tunnels < 2 then
+    computer.beep(880, 0.5)
+    error("Precisa de 2 Linked Cards! Encontradas: " .. #tunnels)
+end
+
+local tunnelTablet, tunnelServer
+if tunnels[1].getChannel() < tunnels[2].getChannel() then
+    tunnelTablet = tunnels[1]
+    tunnelServer = tunnels[2]
+else
+    tunnelTablet = tunnels[2]
+    tunnelServer = tunnels[1]
+end
+
+-- Protocol inline
 local P = {
     MSG_LIST    = "LIST",
     MSG_ADD     = "ADD",
@@ -24,58 +85,29 @@ local P = {
 }
 
 -- ----------------------------------------------------------------
--- Verifica componentes
--- ----------------------------------------------------------------
-if not component.isAvailable("dislocator_advanced") then
-    error("DislocatorAdvanced não encontrado!")
-end
-
-local tunnels = {}
-for addr, _ in component.list("tunnel") do
-    table.insert(tunnels, component.proxy(addr))
-end
-
-if #tunnels < 2 then
-    error("Precisa de 2 Linked Cards! Encontradas: " .. #tunnels)
-end
-
--- Card de menor canal = tablet, maior = server
-local tunnelTablet, tunnelServer
-if tunnels[1].getChannel() < tunnels[2].getChannel() then
-    tunnelTablet = tunnels[1]
-    tunnelServer = tunnels[2]
-else
-    tunnelTablet = tunnels[2]
-    tunnelServer = tunnels[1]
-end
-
-local dislocator = component.dislocator_advanced
-
--- ----------------------------------------------------------------
--- Log para o tablet
+-- Log
 -- ----------------------------------------------------------------
 local function log(text, msgType)
     msgType = msgType or P.MSG_LOG
-    print("[drone] " .. text)
-    tunnelTablet.send(serial.serialize({ replyType = msgType, text = text }))
+    tunnelTablet.send(serialize({ replyType = msgType, text = text }))
 end
 
 -- ----------------------------------------------------------------
--- Relay tablet → server
+-- Relay para server
 -- ----------------------------------------------------------------
 local function relayToServer(msgType, data)
-    tunnelServer.send(serial.serialize({ type = msgType, data = data or {} }))
-    local deadline = require("computer").uptime() + 5
-    while require("computer").uptime() < deadline do
-        local _, _, _, _, _, raw = event.pull(1, "modem_message")
-        if raw then
-            local ok, resp = pcall(serial.unserialize, raw)
-            if ok and resp and resp.replyType == P.MSG_REPLY then
+    tunnelServer.send(serialize({ type = msgType, data = data or {} }))
+    local deadline = computer.uptime() + 5
+    while computer.uptime() < deadline do
+        local ev, _, _, _, _, raw = computer.pullSignal(1)
+        if ev == "modem_message" and raw then
+            local resp = unserialize(raw)
+            if resp and resp.replyType == P.MSG_REPLY then
                 return resp
             end
         end
     end
-    return nil, "Server não respondeu"
+    return nil, "timeout"
 end
 
 -- ----------------------------------------------------------------
@@ -91,11 +123,11 @@ local function teleportTo(name)
             return false, tostring(reason)
         end
     end
-    return false, "Waypoint '" .. name .. "' não encontrado"
+    return false, "waypoint nao encontrado: " .. name
 end
 
 -- ----------------------------------------------------------------
--- Teleporte para coordenadas dinâmicas
+-- Teleporte para coordenadas
 -- ----------------------------------------------------------------
 local TEMP_SLOT = 0
 
@@ -113,19 +145,21 @@ local function teleportToCoords(x, y, z, label)
 end
 
 -- ----------------------------------------------------------------
--- Coleta por armadura (placeholders)
+-- Coleta (placeholders)
 -- ----------------------------------------------------------------
 local armorCollect = {}
 
 armorCollect[1] = function()
-    log("  [placeholder] Coletando armadura 1...")
-    os.sleep(1)
+    log("Coletando armadura 1...")
+    local deadline = computer.uptime() + 1
+    while computer.uptime() < deadline do computer.pullSignal(0.1) end
     return true
 end
 
 armorCollect[2] = function()
-    log("  [placeholder] Coletando armadura 2...")
-    os.sleep(1)
+    log("Coletando armadura 2...")
+    local deadline = computer.uptime() + 1
+    while computer.uptime() < deadline do computer.pullSignal(0.1) end
     return true
 end
 
@@ -133,8 +167,9 @@ end
 -- Entrega (placeholder)
 -- ----------------------------------------------------------------
 local function deliver()
-    log("  [placeholder] Entregando ao player...")
-    os.sleep(1)
+    log("Entregando ao player...")
+    local deadline = computer.uptime() + 1
+    while computer.uptime() < deadline do computer.pullSignal(0.1) end
     return true
 end
 
@@ -143,73 +178,62 @@ end
 -- ----------------------------------------------------------------
 local function executeMission(data)
     local armorId = data.armor_id
-    log("Missão: armadura ID=" .. armorId)
+    log("Missao ID=" .. armorId)
 
-    -- Busca coords da armadura
-    log("Consultando server...")
     local resp, err = relayToServer(P.MSG_GET, { id = armorId })
     if not resp or not resp.ok then
-        log("Erro: " .. tostring(err or resp and resp.error), P.MSG_ERROR)
+        log("Erro server: " .. tostring(err or resp and resp.error), P.MSG_ERROR)
         return false
     end
 
     local armor = resp.armor
-    log(string.format("'%s' em X=%d Y=%d Z=%d", armor.name, armor.x, armor.y, armor.z))
+    log("Indo buscar: " .. armor.name)
 
-    -- Vai buscar
-    log("Teleportando para armadura...")
     local ok2, err2 = teleportToCoords(armor.x, armor.y, armor.z, "_armor")
-    if not ok2 then log("Falha: "..tostring(err2), P.MSG_ERROR) return false end
+    if not ok2 then log("Falha tp: "..tostring(err2), P.MSG_ERROR) return false end
     log("Chegou.")
 
-    -- Coleta
     local fn = armorCollect[armorId]
-    if not fn then log("Sem função para ID="..armorId, P.MSG_ERROR) return false end
-    if not fn() then log("Falha na coleta.", P.MSG_ERROR) return false end
-    log("Coletado.")
+    if not fn then log("Sem coleta para ID="..armorId, P.MSG_ERROR) return false end
+    if not fn() then log("Falha coleta.", P.MSG_ERROR) return false end
 
-    -- Vai entregar
-    log(string.format("Indo entregar em X=%d Y=%d Z=%d", data.dx, data.dy, data.dz))
+    log("Indo entregar...")
     local ok4, err4 = teleportToCoords(data.dx, data.dy, data.dz, "_delivery")
-    if not ok4 then log("Falha: "..tostring(err4), P.MSG_ERROR) return false end
-    log("Chegou na entrega.")
+    if not ok4 then log("Falha tp: "..tostring(err4), P.MSG_ERROR) return false end
 
-    -- Entrega
-    if not deliver() then log("Falha na entrega.", P.MSG_ERROR) return false end
-    log("Entregue.")
+    if not deliver() then log("Falha entrega.", P.MSG_ERROR) return false end
 
-    -- Volta para base
-    log("Retornando...")
+    log("Voltando para base...")
     local ok6, err6 = teleportTo(P.WAYPOINT_BASE)
-    if not ok6 then log("Falha: "..tostring(err6), P.MSG_ERROR) return false end
+    if not ok6 then log("Falha base: "..tostring(err6), P.MSG_ERROR) return false end
 
-    log("Missão concluída!", P.MSG_OK)
+    log("Missao concluida!", P.MSG_OK)
     return true
 end
 
 -- ----------------------------------------------------------------
 -- Loop principal
 -- ----------------------------------------------------------------
-print("Drone ativo")
-print("Tablet: " .. tunnelTablet.getChannel())
-print("Server: " .. tunnelServer.getChannel())
+-- Sinaliza que está ativo
+computer.beep(660, 0.2)
+log("Drone ativo. Tablet:" .. tunnelTablet.getChannel() .. " Server:" .. tunnelServer.getChannel())
 
 while true do
-    local _, _, _, _, _, raw = event.pull("modem_message")
-    if raw then
-        local ok, msg = pcall(serial.unserialize, raw)
-        if ok and msg then
+    local ev, _, _, _, _, raw = computer.pullSignal(1)
+    if ev == "modem_message" and raw then
+        local msg = unserialize(raw)
+        if msg then
             if msg.type == P.MSG_MISSION then
-                local success = executeMission(msg.data or {})
-                if not success then log("Missão com erro.", P.MSG_ERROR) end
+                local ok = executeMission(msg.data or {})
+                if not ok then log("Missao com erro.", P.MSG_ERROR) end
             elseif msg.type then
-                -- Relay CRUD para o server
+                -- Relay CRUD para server
                 local resp, err = relayToServer(msg.type, msg.data)
                 if not resp then
                     resp = { ok = false, error = tostring(err), replyType = P.MSG_REPLY }
                 end
                 resp.replyType = P.MSG_REPLY
-                tunnelTablet.send(serial.serialize(resp))
+                tunnelTablet.send(serialize(resp))
             end
         end
     end
