@@ -7,26 +7,31 @@ local function log(s)
   st(s) local t=tun() if t then t.send(tostring(s)) end
 end
 
--- Lista componentes
-log("componentes:")
-for addr,tipo in component.list() do
-  log(tipo)
-  computer.pullSignal(0.2)
-end
+log("testando inv...")
 
--- Lista itens no inventario do drone
-local ic=component.proxy(component.list("inventory_controller")())
-if ic then
-  local size=ic.getInventorySize(0)
-  log("inv size:"..tostring(size))
-  for i=1,size do
-    local item=ic.getStackInSlot(0,i)
-    if item then
-      log("slot"..i..":"..tostring(item.name))
+-- O drone acessa seu proprio inventario via componente drone
+if dr then
+  local ok,size=pcall(function() return dr.inventorySize() end)
+  log("drone.inventorySize: "..tostring(ok).." "..tostring(size))
+  if ok and size then
+    for i=1,size do
+      local ok2,item=pcall(function() return dr.getStackInSlot(i) end)
+      if ok2 and item then
+        log("slot"..i..":"..tostring(item.name))
+      end
     end
   end
-else
-  log("sem inventory_controller")
+end
+
+-- Tenta inventory_controller com sides diferentes
+local ic=component.proxy(component.list("inventory_controller")())
+if ic then
+  for side=0,5 do
+    local ok,size=pcall(function() return ic.getInventorySize(side) end)
+    if ok and size then
+      log("ic side"..side.." size:"..tostring(size))
+    end
+  end
 end
 
 st("done")
