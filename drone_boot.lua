@@ -4,17 +4,30 @@ local function tun()
   for a,_ in component.list("tunnel") do return component.proxy(a) end
 end
 local function log(s)
-  st(s)
-  local t=tun() if t then t.send(tostring(s)) end
+  st(s) local t=tun() if t then t.send(tostring(s)) end
 end
-log("listando...")
-local list=""
+
+-- Lista componentes
+log("componentes:")
 for addr,tipo in component.list() do
-  list=list..tipo.."\n"
   log(tipo)
-  computer.pullSignal(0.3)
+  computer.pullSignal(0.2)
 end
-local t=tun()
-if t then t.send("LISTA COMPLETA:\n"..list) end
+
+-- Lista itens no inventario do drone
+local ic=component.proxy(component.list("inventory_controller")())
+if ic then
+  local size=ic.getInventorySize(0)
+  log("inv size:"..tostring(size))
+  for i=1,size do
+    local item=ic.getStackInSlot(0,i)
+    if item then
+      log("slot"..i..":"..tostring(item.name))
+    end
+  end
+else
+  log("sem inventory_controller")
+end
+
 st("done")
 while true do computer.pullSignal(1) end
