@@ -52,12 +52,41 @@ for a,_ in component.list("tunnel") do
 end
 if #tunnels<2 then error("Precisa 2 tunnels! Tem:"..#tunnels) end
 
+-- Identifica qual tunnel e server e qual e tablet
+-- Manda PING para cada card separadamente e ve qual responde com role=server
 local tT,tS
-if tunnels[1].getChannel()<tunnels[2].getChannel() then
-    tT,tS=tunnels[1],tunnels[2]
-else
-    tT,tS=tunnels[2],tunnels[1]
+local function identifyTunnels()
+    for _,t in ipairs(tunnels) do
+        -- Manda ping para cada card e espera resposta por 2 segundos
+        t.send(serialize({type="PING",data={}}))
+        local deadline=computer.uptime()+2
+        local gotReply=false
+        while computer.uptime()<deadline do
+            local ev,_,sender,_,_,raw=computer.pullSignal(0.5)
+            if ev=="modem_message" and raw then
+                local r=unserialize(raw)
+                if r and r.role=="server" then
+                    tS=t
+                    gotReply=true
+                    break
+                end
+            end
+        end
+        if gotReply then break end
+    end
+    -- tT e a que nao e tS
+    if tS then
+        tT=tunnels[1]==tS and tunnels[2] or tunnels[1]
+    else
+        -- Fallback: menor canal = tablet
+        if tunnels[1].getChannel()<tunnels[2].getChannel() then
+            tT,tS=tunnels[1],tunnels[2]
+        else
+            tT,tS=tunnels[2],tunnels[1]
+        end
+    end
 end
+identifyTunnels()
 
 local function log(txt,tp)
     tp=tp or P.MSG_LOG
