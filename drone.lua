@@ -1,15 +1,11 @@
 local function proxy(n)
-    local a=component.list(n)()
-    return a and component.proxy(a) or nil
+    local a=component.list(n)() return a and component.proxy(a) or nil
 end
 
--- Escapa uma string sem usar string.format %q
 local function escape(s)
     s=tostring(s)
-    s=s:gsub('\\','\\\\')
-    s=s:gsub('"','\\"')
-    s=s:gsub('\n','\\n')
-    s=s:gsub('\r','\\r')
+    s=s:gsub('\\','\\\\') s=s:gsub('"','\\"')
+    s=s:gsub('\n','\\n')  s=s:gsub('\r','\\r')
     s=s:gsub('\0','\\0')
     return '"'..s..'"'
 end
@@ -32,8 +28,7 @@ end
 
 local function unserialize(s)
     if not s or s=="" then return nil end
-    local ok,r=pcall(load("return "..s))
-    return ok and r or nil
+    local ok,r=pcall(load("return "..s)) return ok and r or nil
 end
 
 local P={
@@ -42,6 +37,25 @@ local P={
     MSG_OK="OK",MSG_ERROR="ERROR",MSG_LOG="LOG",MSG_REPLY="REPLY",
     WAYPOINT_BASE="base"
 }
+
+-- Estado persistente na EEPROM data
+-- Salva a missao e a etapa atual para sobreviver ao reinicio pos-teleporte
+local eeprom=proxy("eeprom")
+
+local function saveState(state)
+    if eeprom then eeprom.setData(serialize(state)) end
+end
+
+local function loadState()
+    if not eeprom then return nil end
+    local raw=eeprom.getData()
+    if not raw or raw=="" or raw:sub(1,1)~="{" then return nil end
+    return unserialize(raw)
+end
+
+local function clearState()
+    if eeprom then eeprom.setData("") end
+end
 
 local dis=proxy("dislocator_advanced")
 if not dis then error("Sem dislocator!") end
@@ -52,33 +66,25 @@ for a,_ in component.list("tunnel") do
 end
 if #tunnels<2 then error("Precisa 2 tunnels! Tem:"..#tunnels) end
 
--- Identifica qual tunnel e server e qual e tablet
--- Manda PING para cada card separadamente e ve qual responde com role=server
 local tT,tS
 local function identifyTunnels()
     for _,t in ipairs(tunnels) do
-        -- Manda ping para cada card e espera resposta por 2 segundos
         t.send(serialize({type="PING",data={}}))
         local deadline=computer.uptime()+2
-        local gotReply=false
         while computer.uptime()<deadline do
-            local ev,_,sender,_,_,raw=computer.pullSignal(0.5)
+            local ev,_,_,_,_,raw=computer.pullSignal(0.5)
             if ev=="modem_message" and raw then
                 local r=unserialize(raw)
                 if r and r.role=="server" then
-                    tS=t
-                    gotReply=true
-                    break
+                    tS=t break
                 end
             end
         end
-        if gotReply then break end
+        if tS then break end
     end
-    -- tT e a que nao e tS
     if tS then
         tT=tunnels[1]==tS and tunnels[2] or tunnels[1]
     else
-        -- Fallback: menor canal = tablet
         if tunnels[1].getChannel()<tunnels[2].getChannel() then
             tT,tS=tunnels[1],tunnels[2]
         else
@@ -130,48 +136,94 @@ end
 
 local collect={}
 collect[1]=function()
-    log("Coletando 1...")
+    log("[placeholder] Coletando 1...")
     local d=computer.uptime()+1
     while computer.uptime()<d do computer.pullSignal(0.1) end
     return true
 end
 collect[2]=function()
-    log("Coletando 2...")
+    log("[placeholder] Coletando 2...")
     local d=computer.uptime()+1
     while computer.uptime()<d do computer.pullSignal(0.1) end
     return true
 end
 
 local function deliver()
-    log("Entregando...")
+    log("[placeholder] Entregando...")
     local d=computer.uptime()+1
     while computer.uptime()<d do computer.pullSignal(0.1) end
     return true
 end
 
-local function mission(data)
+-- Etapas da missao:
+-- 1 = indo buscar armadura
+-- 2 = coletando
+-- 3 = indo entregar
+-- 4 = entregando
+-- 5 = voltando para base
+local function mission(data,startStep)
+    startStep=startStep or 1
     local id=data.armor_id
-    log("Missao id="..id)
-    local r,e=relay(P.MSG_GET,{id=id})
-    if not r or not r.ok then log("Erro server:"..(e or r and r.error or "?"),P.MSG_ERROR) return end
-    local arm=r.armor
-    log("Buscando "..arm.name)
-    local ok,er=tpCoords(arm.x,arm.y,arm.z,"_a")
-    if not ok then log("Falha tp:"..tostring(er),P.MSG_ERROR) return end
-    local fn=collect[id]
-    if not fn then log("Sem coleta id="..id,P.MSG_ERROR) return end
-    fn()
-    log("Indo entregar")
-    ok,er=tpCoords(data.dx,data.dy,data.dz,"_d")
-    if not ok then log("Falha tp:"..tostring(er),P.MSG_ERROR) return end
-    deliver()
-    log("Voltando base")
-    ok,er=tpTo(P.WAYPOINT_BASE)
-    if not ok then log("Falha base:"..tostring(er),P.MSG_ERROR) return end
-    log("Concluido!",P.MSG_OK)
+
+    -- Busca dados da armadura se ainda nao temos
+    local arm=data.armor
+    if not arm then
+        local r,e=relay(P.MSG_GET,{id=id})
+        if not r or not r.ok then
+            log("Erro server:"..(e or r and r.error or "?"),P.MSG_ERROR)
+            clearState() return
+        end
+        arm=r.armor
+        data.armor=arm
+    end
+
+    if startStep<=1 then
+        log("Indo buscar "..arm.name)
+        saveState({step=1,data=data})
+        local ok,er=tpCoords(arm.x,arm.y,arm.z,"_a")
+        if not ok then log("Falha tp:"..tostring(er),P.MSG_ERROR) clearState() return end
+    end
+
+    if startStep<=2 then
+        log("Chegou. Coletando...")
+        saveState({step=2,data=data})
+        local fn=collect[id]
+        if not fn then log("Sem coleta id="..id,P.MSG_ERROR) clearState() return end
+        fn()
+    end
+
+    if startStep<=3 then
+        log("Indo entregar")
+        saveState({step=3,data=data})
+        local ok,er=tpCoords(data.dx,data.dy,data.dz,"_d")
+        if not ok then log("Falha tp:"..tostring(er),P.MSG_ERROR) clearState() return end
+    end
+
+    if startStep<=4 then
+        log("Entregando...")
+        saveState({step=4,data=data})
+        deliver()
+    end
+
+    if startStep<=5 then
+        log("Voltando para base...")
+        saveState({step=5,data=data})
+        local ok,er=tpTo(P.WAYPOINT_BASE)
+        if not ok then log("Falha base:"..tostring(er),P.MSG_ERROR) clearState() return end
+    end
+
+    clearState()
+    log("Missao concluida!",P.MSG_OK)
 end
 
-log("Drone OK tT="..tT.getChannel().." tS="..tS.getChannel())
+log("Drone OK")
+
+-- Verifica se ha missao em andamento (reinicio pos-teleporte)
+local state=loadState()
+if state and state.step and state.data then
+    log("Retomando missao na etapa "..state.step)
+    pcall(mission,state.data,state.step+1)
+end
 
 while true do
     local ev,_,_,_,_,raw=computer.pullSignal(1)
