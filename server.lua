@@ -47,6 +47,10 @@ end
 local armors   = load()
 local handlers = {}
 
+handlers["PING"] = function(data)
+    return { ok = true, role = "server" }
+end
+
 handlers[P.MSG_LIST] = function(data)
     return { ok = true, armors = armors }
 end
